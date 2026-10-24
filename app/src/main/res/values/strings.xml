@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">Blank</string>
+    <string name="title_blank">BLANK</string>
+    <string name="subtitle">LOCAL VPN AD/TRACKER BLOCKER</string>
+    <string name="status_label">INTERFACE STATUS</string>
+    <string name="status_inactive">Protection Inactive</string>
+    <string name="status_active">Active &amp; Protecting</string>
+    <string name="ip_label">Local Filter Tunnel:</string>
+    <string name="ip_value">10.0.0.2 / 32</string>
+    <string name="stats_title">PROTECTION STATS</string>
+    <string name="label_blocked">Ads &amp; Trackers Blocked</string>
+    <string name="label_total">Total Queries Processed</string>
+    <string name="btn_start">START BLANK</string>
+    <string name="btn_stop">STOP BLANK</string>
+    <string name="milestone_info">Phase 1: Local DNS Filtering • 100% On-Device Privacy</string>
+</resources>

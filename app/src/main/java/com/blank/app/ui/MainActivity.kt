@@ -1,0 +1,133 @@
+package com.blank.app.ui
+
+import android.app.Activity
+import android.content.Intent
+import android.net.VpnService
+import android.os.Bundle
+import android.view.View
+import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.AppCompatButton
+import androidx.core.content.ContextCompat
+import com.blank.app.R
+import com.blank.app.dns.BlocklistMatcher
+import com.blank.app.service.BlankVpnService
+import com.blank.app.util.StatsManager
+import java.text.NumberFormat
+import java.util.Locale
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var viewStatusDot: View
+    private lateinit var tvStatus: TextView
+    private lateinit var btnToggle: AppCompatButton
+    private lateinit var tvBlockedCount: TextView
+    private lateinit var tvTotalCount: TextView
+
+    private val numberFormat = NumberFormat.getNumberInstance(Locale.US)
+
+    private val vpnConsentLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            startVpnService()
+        } else {
+            updateUi()
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        // Initialize managers
+        StatsManager.init(applicationContext)
+        if (!BlocklistMatcher.isLoaded) {
+            BlocklistMatcher.load(applicationContext)
+        }
+
+        viewStatusDot = findViewById(R.id.viewStatusDot)
+        tvStatus = findViewById(R.id.tvStatus)
+        btnToggle = findViewById(R.id.btnToggle)
+        tvBlockedCount = findViewById(R.id.tvBlockedCount)
+        tvTotalCount = findViewById(R.id.tvTotalCount)
+
+        btnToggle.setOnClickListener {
+            if (BlankVpnService.isRunning.get()) {
+                stopVpnService()
+            } else {
+                prepareAndStartVpn()
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        BlankVpnService.stateChangeListener = {
+            runOnUiThread { updateUi() }
+        }
+        StatsManager.onStatsUpdated = {
+            runOnUiThread { updateStatsUi() }
+        }
+        updateUi()
+        updateStatsUi()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        BlankVpnService.stateChangeListener = null
+        StatsManager.onStatsUpdated = null
+    }
+
+    private fun prepareAndStartVpn() {
+        val consentIntent = VpnService.prepare(this)
+        if (consentIntent != null) {
+            vpnConsentLauncher.launch(consentIntent)
+        } else {
+            startVpnService()
+        }
+    }
+
+    private fun startVpnService() {
+        val intent = Intent(this, BlankVpnService::class.java).apply {
+            action = BlankVpnService.ACTION_START
+        }
+        startService(intent)
+        updateUi()
+    }
+
+    private fun stopVpnService() {
+        val intent = Intent(this, BlankVpnService::class.java).apply {
+            action = BlankVpnService.ACTION_STOP
+        }
+        startService(intent)
+        updateUi()
+    }
+
+    private fun updateUi() {
+        val isRunning = BlankVpnService.isRunning.get()
+        if (isRunning) {
+            viewStatusDot.setBackgroundResource(R.drawable.bg_status_dot_active)
+            tvStatus.setText(R.string.status_active)
+            tvStatus.setTextColor(ContextCompat.getColor(this, R.color.accent_green))
+            btnToggle.setText(R.string.btn_stop)
+            btnToggle.setBackgroundResource(R.drawable.bg_button_stop)
+            btnToggle.setTextColor(ContextCompat.getColor(this, R.color.text_primary))
+        } else {
+            viewStatusDot.setBackgroundResource(R.drawable.bg_status_dot_inactive)
+            tvStatus.setText(R.string.status_inactive)
+            tvStatus.setTextColor(ContextCompat.getColor(this, R.color.text_primary))
+            btnToggle.setText(R.string.btn_start)
+            btnToggle.setBackgroundResource(R.drawable.bg_button_start)
+            btnToggle.setTextColor(ContextCompat.getColor(this, R.color.bg_dark))
+        }
+    }
+
+    private fun updateStatsUi() {
+        val blocked = StatsManager.blockedAds.get()
+        val total = StatsManager.totalQueries.get()
+        tvBlockedCount.text = numberFormat.format(blocked)
+        tvTotalCount.text = numberFormat.format(total)
+    }
+}

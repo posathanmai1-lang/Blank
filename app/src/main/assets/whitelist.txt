@@ -1,0 +1,18 @@
+# Blank Critical Whitelist (Never Block)
+# Hotstar Core Playback & DRM Endpoints
+bifrost-api.hotstar.com
+shifu.hotstarext.com
+hotstar.com
+www.hotstar.com
+api.hotstar.com
+secure-dpt.hotstar.com
+img.hotstar.com
+hses.hotstar.com
+
+# System & DRM Essentials
+widevine.com
+connectivitycheck.gstatic.com
+connectivitycheck.android.com
+clients3.google.com
+play.googleapis.com
+android.clients.google.com

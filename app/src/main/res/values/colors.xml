@@ -1,0 +1,12 @@
+<resources>
+    <color name="bg_dark">#0B0E14</color>
+    <color name="card_bg">#151922</color>
+    <color name="card_stroke">#222A38</color>
+    <color name="text_primary">#F0F4FC</color>
+    <color name="text_secondary">#8C9BAE</color>
+    <color name="accent_green">#00E676</color>
+    <color name="accent_green_glow">#1A00E676</color>
+    <color name="accent_red">#FF5252</color>
+    <color name="accent_blue">#3D82F6</color>
+    <color name="dot_inactive">#4A5568</color>
+</resources>
