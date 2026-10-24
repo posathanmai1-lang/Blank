@@ -17,6 +17,12 @@ Blank is an Android application that provides **Brave Browser-like ad and tracke
   - App-level exclusion UI.
   - Only when requested: optional, privacy-safe aggregate block count sync.
 
+## Git & Collaboration Rules
+- **Branch Protection Active**: Direct pushes to `main` are protected and restricted.
+- All work must be done on dedicated feature branches (e.g. `feature/phase1-stability`, `feature/notification-lifecycle`).
+- Commit messages must be clear and conventional (e.g. `feat: ...`, `fix: ...`).
+- When work is ready, push the feature branch to origin (`git push -u origin feature/...`) so the repo owner can review and merge via Pull Request.
+
 ## Non-Negotiable Privacy Rules
 1. NEVER log, store, or transmit domain names, URLs, app package names, or query timestamps.
 2. Only track in-memory / local aggregate numeric counters (Blocked Count, Total Queries).

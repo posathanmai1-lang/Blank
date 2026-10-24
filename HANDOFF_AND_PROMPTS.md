@@ -84,43 +84,57 @@ To share this project with your collaborator while keeping **100% legal and tech
 
 ## 4. Prompts Ready for Antigravity
 
-### 💬 Prompt A: Chat Interface Prompt (For your friend to paste in Antigravity)
-> Copy and paste this directly into the Antigravity chat window on your friend's PC:
+### 💬 Prompt 1: Chat Interface Prompt (Paste into Antigravity Chat)
+> Your friend copies and pastes this directly into Antigravity chat. Antigravity will use its built-in terminal to check git, setup a branch, verify the D-drive SDK, test the Gradle build, and outline next steps without your friend having to type manual commands.
 
 ```markdown
-Hello Antigravity! I am taking over development of the Blank project.
+Hello Antigravity! I am collaborating on the Blank project with repo owner posathanmai1-lang.
 
-Our core mission: System-wide Brave Browser-like ad and tracker blocking on Android mobile devices using a 100% on-device local VpnService (no root, zero telemetry, local DNS synthesis).
+Our Vision:
+System-wide Brave Browser-like ad and tracker blocking on Android mobile devices using a 100% on-device local VpnService (10.0.0.2 loopback, UDP port 53 DNS interception, zero telemetry, RFC 0.0.0.0 synthesis).
 
-Please read `GEMINI.md`, `AGENTS.md`, and `.agents/workflows/blank-guidelines.md` before doing anything.
+Collaboration & GitHub Access:
+- I have accepted collaboration on the GitHub repository: https://github.com/posathanmai1-lang/Blank
+- IMPORTANT: The `main` branch has branch protection enabled. Direct pushes to `main` will be rejected by GitHub.
+- You (Antigravity) must handle all git operations via your terminal tools: create a new feature branch (e.g. `feature/phase1-stability`), commit changes with conventional commit messages, and push the branch to origin (`git push -u origin feature/...`) so the owner can review and merge via Pull Request.
 
-Key Constraints:
-1. We are in Phase 1 (VPN stability & DNS filtering on-device). Do NOT scaffold any backend, cloud sync, or leaderboards.
-2. Privacy is non-negotiable: NEVER log domains or app names. Only aggregate numeric stats.
-3. Drive constraint: All Gradle caches, Android SDK, and builds MUST remain on D: drive. Do not write to C: drive.
-4. Lightweight first: Kotlin + Android SDK first. No bulky 3rd party libraries.
+Workspace Constraints:
+1. Phase 1 Only: Local VpnService + DNS synthesis + upstream forwarding + anti-VPN bypass + foreground service stability. No backend, no leaderboards, no dashboards.
+2. Privacy: Zero logging of domains, URLs, or packages. Local aggregate counters only.
+3. Storage: All builds, SDKs, and Gradle caches must remain on D: drive. Never write to C: drive.
+4. Minimal Dependencies: Kotlin stdlib + Android SDK first.
 
-Please review `HANDOFF_AND_PROMPTS.md` and `app/src/main/java/com/blank/app/` to understand the current code, and tell me:
-1. Is the project ready to build right now with Gradle?
-2. What are the top 3 immediate tasks we need to complete for Phase 1 stabilization?
+Please run terminal commands right now to:
+1. Verify git status and current branch, and checkout a new branch `feature/phase1-stability`.
+2. Verify that Android SDK and Gradle paths on D: drive are properly set in `local.properties`.
+3. Run `./gradlew assembleDebug` to test if the project compiles cleanly.
+4. Report back the build status and what immediate Phase 1 hardening tasks you will begin.
 ```
 
 ---
 
-### 🛠️ Prompt B: Workflow / Build Prompt (To test & build the APK)
+### 🛠️ Prompt 2: Workflow Workspace Prompt (For `.agents/workflows/` or workflow runner)
 ```markdown
-Check our Android SDK and Gradle setup on D: drive, verify that `local.properties` correctly points to the D-drive Android SDK, and run `./gradlew assembleDebug` to test the build. If there are any compiler or manifest errors, diagnose and resolve them.
+# Phase 1 Development & Verification Workflow
+1. Branch Setup: Always ensure working branch is `feature/<feature-name>`. Never commit directly to `main`.
+2. Environment Check: Ensure `ANDROID_HOME`, `ANDROID_SDK_ROOT`, and `GRADLE_USER_HOME` point to D-drive paths. Ensure `local.properties` exists on D drive.
+3. Code Implementation: Implement Phase 1 features (e.g., foreground notification, blocklist scaling, network switch reconnection) keeping $O(1)$ lookups and zero hot-loop allocations.
+4. Local Validation: Run `./gradlew assembleDebug` in terminal to verify zero compilation errors and test APK creation.
+5. Push & PR: Run `git add .`, commit with descriptive message, and push the feature branch (`git push -u origin feature/<feature-name>`) for owner review.
 ```
 
 ---
 
-### 📋 Prompt C: Workspace Rules & Context Summary
-> (Already configured in `GEMINI.md` and `AGENTS.md` in the project root)
-- **Role**: High-performance, lightweight Android network and DNS filtering tool.
-- **Rule 1**: Phase 1 focus only.
-- **Rule 2**: Strict privacy.
-- **Rule 3**: D: Drive environment only.
-- **Rule 4**: Fast $O(1)$ lookups, battery-friendly event loops.
+### 📋 Prompt 3: Workspace Rules Prompt (For `GEMINI.md` or IDE workspace rules settings)
+```markdown
+# Blank Workspace Rules
+- Role: Native Android Systems Engineer working as a collaborator on `posathanmai1-lang/Blank`.
+- Vision: System-wide Brave-style ad/tracker blocker using Android VpnService (10.0.0.2 loopback, port 53 DNS capture, RFC 0.0.0.0 reply, zero remote servers).
+- Strict Build Phase: Phase 1 only. Do NOT scaffold cloud sync, leaderboards, or web dashboards.
+- Privacy: Zero logging of visited domains or apps. Local aggregate counters only.
+- Git Rules: `main` branch is protected. All work must be committed and pushed on `feature/*` branches for owner PR review.
+- Storage & Paths: D: drive strictly for all SDKs, Gradle caches, and build outputs. C: drive is strictly off-limits.
+```
 
 ---
 
@@ -128,4 +142,5 @@ Check our Android SDK and Gradle setup on D: drive, verify that `local.propertie
 - [ ] Clone repo to `D:\Blank` (must be on D: drive).
 - [ ] Ensure `local.properties` has `sdk.dir=D\:\\Android\\Sdk` (matching friend's D-drive SDK path).
 - [ ] Open folder `D:\Blank` in Antigravity IDE.
-- [ ] Antigravity will automatically pick up `GEMINI.md`, `AGENTS.md`, and `.agents/workflows/blank-guidelines.md`.
+- [ ] Paste Prompt 1 into the chat window — Antigravity will autonomously inspect the setup and compile!
+
