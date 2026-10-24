@@ -81,11 +81,8 @@ class BlankVpnService : VpnService(), Runnable {
             val builder = Builder()
                 .setSession("Blank")
                 .addAddress(VPN_ADDRESS, VPN_PREFIX)
-                .addDnsServer(VPN_ADDRESS)       // Intercept all IPv4 DNS queries
+                .addDnsServer(VPN_ADDRESS)       // Intercept all DNS queries locally via IPv4
                 .addRoute(VPN_ADDRESS, VPN_PREFIX)
-                .addAddress("fd00::2", 128)
-                .addDnsServer("fd00::2")         // Intercept all IPv6 DNS queries
-                .addRoute("fd00::2", 128)
                 .setMtu(1500)
                 .setBlocking(true)
 
@@ -219,8 +216,12 @@ class BlankVpnService : VpnService(), Runnable {
     private fun handleIncomingPacket(packet: ByteArray, length: Int) {
         if (length < 28) return
 
+        // 1. Verify IPv4
+        val version = (packet[0].toInt() shr 4) and 0x0F
+        if (version != 4) return
+
         val ihl = (packet[0].toInt() and 0x0F) * 4
-        if (length < ihl + 8) return
+        if (ihl < 20 || length < ihl + 8) return
 
         val protocol = packet[9].toInt() and 0xFF
         if (protocol == 17) { // UDP
@@ -245,8 +246,6 @@ class BlankVpnService : VpnService(), Runnable {
         }
 
         // Drop all non-DNS packets — the TUN interface only handles DNS (port 53).
-        // Re-injecting non-DNS packets would cause routing loops since we only
-        // addRoute for our VPN addresses (10.0.0.2 and fd00::2), not the internet.
     }
 
     private fun processDnsQuery(rawPacket: ByteArray, query: com.blank.app.dns.ParsedDnsQuery) {
@@ -290,6 +289,7 @@ class BlankVpnService : VpnService(), Runnable {
         synchronized(writeLock) {
             try {
                 stream.write(packet)
+                stream.flush()
             } catch (e: Exception) {
                 if (isRunning.get()) {
                     Log.w(TAG, "Error writing to TUN: ${e.message}")
