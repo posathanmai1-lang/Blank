@@ -70,8 +70,19 @@ class BlankVpnService : VpnService(), Runnable {
                 .addAddress(VPN_ADDRESS, VPN_PREFIX)
                 .addDnsServer(VPN_ADDRESS) // Intercept all system DNS queries
                 .addRoute(VPN_ADDRESS, VPN_PREFIX)
+                .addAddress("fd00::2", 128)
+                .addDnsServer("fd00::2")
+                .addRoute("fd00::2", 128)
                 .setMtu(1500)
                 .setBlocking(true)
+
+            // Disallow Blank itself so its sockets and upstream queries never loop into the VPN
+            try {
+                builder.addDisallowedApplication(packageName)
+                Log.i(TAG, "Exempted Blank itself from VPN interface: $packageName")
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not exempt own package: ${e.message}")
+            }
 
             // Exclude apps with strict anti-VPN checks (JioHotstar, JioCinema, Netflix, banking)
             // This strips the TRANSPORT_VPN flag for these apps, preventing NET_100 errors.
@@ -190,12 +201,12 @@ class BlankVpnService : VpnService(), Runnable {
         val isBlocked = BlocklistMatcher.isBlocked(domain)
 
         if (isBlocked) {
-            // Synthesize instant 0.0.0.0 DNS response
+            // Synthesize instant 0.0.0.0 DNS response — ad is blocked
             StatsManager.incrementBlocked()
             val responsePacket = DnsPacketSynthesizer.createBlockedResponse(rawPacket, query)
             writePacketToTun(responsePacket)
         } else {
-            // Forward to upstream DNS resolver
+            // Forward to upstream physical network DNS resolver
             StatsManager.incrementAllowed()
             val upstreamPayload = upstreamResolver?.forward(
                 rawPacket,
@@ -204,12 +215,19 @@ class BlankVpnService : VpnService(), Runnable {
             )
 
             if (upstreamPayload != null) {
+                // Got a real answer — wrap it and inject back into TUN
                 val responsePacket = DnsPacketSynthesizer.wrapUpstreamResponse(
                     query,
                     upstreamPayload,
                     upstreamPayload.size
                 )
                 writePacketToTun(responsePacket)
+            } else {
+                // All DNS servers timed out — send SERVFAIL immediately so the OS
+                // retries or reports failure rather than leaving the socket hanging forever.
+                // This was causing other apps to lose internet when Blank was active.
+                val servFail = DnsPacketSynthesizer.createServFailResponse(rawPacket, query)
+                writePacketToTun(servFail)
             }
         }
     }
@@ -234,6 +252,10 @@ class BlankVpnService : VpnService(), Runnable {
 
         dnsExecutor?.shutdownNow()
         dnsExecutor = null
+
+        // Release network callback to stop listening for network changes
+        upstreamResolver?.release()
+        upstreamResolver = null
 
         try {
             outStream?.close()
