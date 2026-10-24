@@ -1,8 +1,11 @@
 package com.blank.app.ui
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.widget.TextView
@@ -27,6 +30,13 @@ class MainActivity : AppCompatActivity() {
 
     private val numberFormat = NumberFormat.getNumberInstance(Locale.US)
 
+    // Launcher for Android 13+ POST_NOTIFICATIONS permission
+    private val notifPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        // Proceed regardless of outcome — notification is informational only
+    }
+
     private val vpnConsentLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -41,7 +51,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Initialize managers
         StatsManager.init(applicationContext)
         if (!BlocklistMatcher.isLoaded) {
             BlocklistMatcher.load(applicationContext)
@@ -57,6 +66,7 @@ class MainActivity : AppCompatActivity() {
             if (BlankVpnService.isRunning.get()) {
                 stopVpnService()
             } else {
+                requestNotificationPermissionIfNeeded()
                 prepareAndStartVpn()
             }
         }
@@ -80,6 +90,17 @@ class MainActivity : AppCompatActivity() {
         StatsManager.onStatsUpdated = null
     }
 
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                    this, Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
     private fun prepareAndStartVpn() {
         val consentIntent = VpnService.prepare(this)
         if (consentIntent != null) {
@@ -93,7 +114,12 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, BlankVpnService::class.java).apply {
             action = BlankVpnService.ACTION_START
         }
-        startService(intent)
+        // Android 8+ requires startForegroundService for long-running services
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
         updateUi()
     }
 

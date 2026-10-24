@@ -1,10 +1,16 @@
 package com.blank.app.service
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import com.blank.app.R
 import com.blank.app.dns.BlocklistMatcher
 import com.blank.app.dns.DnsPacketParser
 import com.blank.app.dns.DnsPacketSynthesizer
@@ -25,6 +31,8 @@ class BlankVpnService : VpnService(), Runnable {
         const val ACTION_STOP = "com.blank.app.STOP"
         const val VPN_ADDRESS = "10.0.0.2"
         const val VPN_PREFIX = 32
+        private const val NOTIF_CHANNEL_ID = "blank_vpn_channel"
+        private const val NOTIF_ID = 1001
 
         val isRunning = AtomicBoolean(false)
         var stateChangeListener: ((Boolean) -> Unit)? = null
@@ -40,10 +48,10 @@ class BlankVpnService : VpnService(), Runnable {
     override fun onCreate() {
         super.onCreate()
         StatsManager.init(applicationContext)
+        createNotificationChannel()
         if (!BlocklistMatcher.isLoaded) {
             BlocklistMatcher.load(applicationContext)
         }
-        upstreamResolver = UpstreamDnsResolver(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -65,27 +73,32 @@ class BlankVpnService : VpnService(), Runnable {
                 BlocklistMatcher.load(applicationContext)
             }
 
+            // Re-create resolver if it was released on a previous stop
+            if (upstreamResolver == null) {
+                upstreamResolver = UpstreamDnsResolver(this)
+            }
+
             val builder = Builder()
                 .setSession("Blank")
                 .addAddress(VPN_ADDRESS, VPN_PREFIX)
-                .addDnsServer(VPN_ADDRESS) // Intercept all system DNS queries
+                .addDnsServer(VPN_ADDRESS)       // Intercept all IPv4 DNS queries
                 .addRoute(VPN_ADDRESS, VPN_PREFIX)
                 .addAddress("fd00::2", 128)
-                .addDnsServer("fd00::2")
+                .addDnsServer("fd00::2")         // Intercept all IPv6 DNS queries
                 .addRoute("fd00::2", 128)
                 .setMtu(1500)
                 .setBlocking(true)
 
-            // Disallow Blank itself so its sockets and upstream queries never loop into the VPN
+            // Disallow Blank itself so its upstream UDP sockets never loop into the TUN
             try {
                 builder.addDisallowedApplication(packageName)
-                Log.i(TAG, "Exempted Blank itself from VPN interface: $packageName")
+                Log.i(TAG, "Exempted Blank from VPN: $packageName")
             } catch (e: Exception) {
                 Log.w(TAG, "Could not exempt own package: ${e.message}")
             }
 
-            // Exclude apps with strict anti-VPN checks (JioHotstar, JioCinema, Netflix, banking)
-            // This strips the TRANSPORT_VPN flag for these apps, preventing NET_100 errors.
+            // Exclude apps with strict anti-VPN checks so they can still connect
+            // (JioHotstar, JioCinema, Netflix, banking/UPI apps)
             val antiVpnBypassApps = listOf(
                 "in.startv.hotstar",
                 "in.startv.hotstar.dplus",
@@ -95,23 +108,22 @@ class BlankVpnService : VpnService(), Runnable {
                 "com.amazon.avod.thirdpartyclient",
                 "com.google.android.apps.nbu.paisa.user",
                 "net.one97.paytm",
-                "com.phonepe.app"
+                "com.phonepe.app",
+                "in.gov.uidai.mAadhaarPlus",
+                "com.sbi.lotusintouch",
+                "com.csam.icici.bank.imobile"
             )
             for (pkg in antiVpnBypassApps) {
                 try {
                     builder.addDisallowedApplication(pkg)
-                    Log.i(TAG, "Exempted anti-VPN app from tunnel: $pkg")
                 } catch (e: Exception) {
-                    // App is not installed on this device, safely ignore
+                    // App not installed on this device — safe to ignore
                 }
             }
 
-            // Configure pending intent to open MainActivity from notification
             val configureIntent = packageManager.getLaunchIntentForPackage(packageName)?.let {
                 PendingIntent.getActivity(
-                    this,
-                    0,
-                    it,
+                    this, 0, it,
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
             }
@@ -121,20 +133,60 @@ class BlankVpnService : VpnService(), Runnable {
 
             vpnInterface = builder.establish()
             if (vpnInterface == null) {
-                Log.e(TAG, "Failed to establish VPN interface")
+                Log.e(TAG, "Failed to establish VPN interface — user revoked permission?")
                 return
             }
+
+            // Android 8+ requires a foreground notification or the service is killed within seconds
+            startForeground(NOTIF_ID, buildNotification())
 
             dnsExecutor = Executors.newFixedThreadPool(4)
             isRunning.set(true)
             stateChangeListener?.invoke(true)
 
             workerThread = Thread(this, "BlankVpnThread").apply { start() }
-            Log.i(TAG, "Blank VPN active with ${BlocklistMatcher.blocklistCount} blocked domains")
+            Log.i(TAG, "Blank VPN active — ${BlocklistMatcher.blocklistCount} blocked domains")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start Blank VPN", e)
             stopVpn()
         }
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                NOTIF_CHANNEL_ID,
+                "Blank VPN",
+                NotificationManager.IMPORTANCE_LOW  // Silent — no sound/vibration
+            ).apply {
+                description = "Blank ad-blocking VPN is running"
+                setShowBadge(false)
+            }
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.createNotificationChannel(channel)
+        }
+    }
+
+    private fun buildNotification(): Notification {
+        val openAppIntent = packageManager.getLaunchIntentForPackage(packageName)?.let {
+            PendingIntent.getActivity(
+                this, 0, it,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+        }
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, NOTIF_CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        return builder
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Blank is active")
+            .setContentText("Blocking ads & trackers across all apps")
+            .setOngoing(true)
+            .setContentIntent(openAppIntent)
+            .build()
     }
 
     override fun run() {
@@ -192,8 +244,9 @@ class BlankVpnService : VpnService(), Runnable {
             }
         }
 
-        // Pass-through for other local packets
-        writePacketToTun(packet.copyOf(length))
+        // Drop all non-DNS packets — the TUN interface only handles DNS (port 53).
+        // Re-injecting non-DNS packets would cause routing loops since we only
+        // addRoute for our VPN addresses (10.0.0.2 and fd00::2), not the internet.
     }
 
     private fun processDnsQuery(rawPacket: ByteArray, query: com.blank.app.dns.ParsedDnsQuery) {
@@ -250,18 +303,19 @@ class BlankVpnService : VpnService(), Runnable {
         isRunning.set(false)
         stateChangeListener?.invoke(false)
 
+        // Stop foreground before releasing resources
+        stopForeground(true)
+
         dnsExecutor?.shutdownNow()
         dnsExecutor = null
 
-        // Release network callback to stop listening for network changes
+        // Release NetworkCallback to prevent memory leaks
         upstreamResolver?.release()
         upstreamResolver = null
 
         try {
             outStream?.close()
-        } catch (e: Exception) {
-            // ignore
-        }
+        } catch (e: Exception) { /* ignore */ }
         outStream = null
 
         try {

@@ -19,7 +19,9 @@ class UpstreamDnsResolver(private val vpnService: VpnService) {
     companion object {
         private const val TAG = "UpstreamDnsResolver"
         private const val DNS_PORT = 53
-        private const val SOCKET_TIMEOUT_MS = 800 // 800ms per server for fast resolution
+        private const val SOCKET_TIMEOUT_MS = 1500 // per-server timeout
+        // VPN loopback addresses that must never be used as upstream DNS servers
+        private val VPN_LOOPBACK_ADDRESSES = setOf("10.0.0.2", "fd00::2", "::1", "127.0.0.1")
     }
 
     private val connectivityManager =
@@ -28,15 +30,23 @@ class UpstreamDnsResolver(private val vpnService: VpnService) {
     @Volatile
     private var activePhysicalNetwork: Network? = null
 
-    private val cachedDnsServers = CopyOnWriteArrayList<InetAddress>()
+    // Carrier/Wi-Fi DNS servers discovered from the active physical network
+    private val cachedCarrierServers = CopyOnWriteArrayList<InetAddress>()
 
+    // Public fallbacks used only when carrier DNS is unavailable
     private val publicFallbacks: List<InetAddress> by lazy {
         listOfNotNull(
-            try { InetAddress.getByAddress(byteArrayOf(1, 1, 1, 1)) } catch (e: Exception) { null },
-            try { InetAddress.getByAddress(byteArrayOf(8, 8, 8, 8)) } catch (e: Exception) { null },
-            try { InetAddress.getByAddress(byteArrayOf(9, 9, 9, 9)) } catch (e: Exception) { null },
-            try { InetAddress.getByAddress(byteArrayOf(1, 0, 0, 1)) } catch (e: Exception) { null }
+            safeByAddress(byteArrayOf(1, 1, 1, 1)),   // Cloudflare
+            safeByAddress(byteArrayOf(8, 8, 8, 8)),   // Google
+            safeByAddress(byteArrayOf(9, 9, 9, 9)),   // Quad9
+            safeByAddress(byteArrayOf(1, 0, 0, 1))    // Cloudflare secondary
         )
+    }
+
+    private fun safeByAddress(bytes: ByteArray): InetAddress? = try {
+        InetAddress.getByAddress(bytes)
+    } catch (e: Exception) {
+        null
     }
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -45,6 +55,7 @@ class UpstreamDnsResolver(private val vpnService: VpnService) {
         }
 
         override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+            // Only process physical (non-VPN) networks that have confirmed internet
             if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
                 capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
                 handleNetworkUpdate(network)
@@ -52,19 +63,26 @@ class UpstreamDnsResolver(private val vpnService: VpnService) {
         }
 
         override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
-            handleNetworkUpdate(network)
+            // Guard against VPN network updates leaking in here
+            val cm = connectivityManager ?: return
+            val caps = cm.getNetworkCapabilities(network) ?: return
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                handleNetworkUpdate(network)
+            }
         }
 
         override fun onLost(network: Network) {
             if (activePhysicalNetwork == network) {
+                Log.w(TAG, "Active physical network lost — falling back to public DNS")
                 activePhysicalNetwork = null
-                refreshDnsServers()
+                cachedCarrierServers.clear()
             }
         }
     }
 
     init {
         registerNetworkCallback()
+        // Eagerly seed DNS servers so first query doesn't wait for callback
         refreshDnsServers()
     }
 
@@ -73,6 +91,7 @@ class UpstreamDnsResolver(private val vpnService: VpnService) {
             val cm = connectivityManager ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 cm.registerDefaultNetworkCallback(networkCallback)
+                Log.d(TAG, "Registered default network callback")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to register network callback: ${e.message}")
@@ -83,115 +102,162 @@ class UpstreamDnsResolver(private val vpnService: VpnService) {
         val cm = connectivityManager ?: return
         try {
             val caps = cm.getNetworkCapabilities(network) ?: return
+            // Never use the VPN tunnel itself as a physical upstream
             if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
 
             activePhysicalNetwork = network
+            // Inform the VPN service which physical network carries its traffic
+            // (helps battery accounting and routing on Android 8+)
             vpnService.setUnderlyingNetworks(arrayOf(network))
 
             val linkProps = cm.getLinkProperties(network)
             val newServers = mutableListOf<InetAddress>()
             linkProps?.dnsServers?.forEach { address ->
                 val host = address.hostAddress ?: ""
-                if (host != "10.0.0.2" && !address.isLoopbackAddress && !address.isAnyLocalAddress) {
+                if (host !in VPN_LOOPBACK_ADDRESSES &&
+                    !address.isLoopbackAddress &&
+                    !address.isAnyLocalAddress) {
                     newServers.add(address)
                 }
             }
-            newServers.addAll(publicFallbacks)
 
-            cachedDnsServers.clear()
-            cachedDnsServers.addAll(newServers.distinct())
-            Log.d(TAG, "Active physical network updated: ${network}, DNS: ${cachedDnsServers.map { it.hostAddress }}")
+            cachedCarrierServers.clear()
+            cachedCarrierServers.addAll(newServers)
+            Log.d(TAG, "Physical network updated. Carrier DNS: ${cachedCarrierServers.map { it.hostAddress }}")
         } catch (e: Exception) {
-            Log.w(TAG, "Error processing network update: ${e.message}")
+            Log.w(TAG, "Error handling network update: ${e.message}")
         }
     }
 
     /**
-     * Fallback discovery in case callback hasn't fired yet
+     * Eagerly discovers DNS servers from the active network before the callback fires.
      */
     private fun refreshDnsServers() {
         val cm = connectivityManager ?: return
-        val servers = mutableListOf<InetAddress>()
-
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val activeNet = cm.activeNetwork
-                if (activeNet != null) {
-                    val caps = cm.getNetworkCapabilities(activeNet)
-                    if (caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
-                        activePhysicalNetwork = activeNet
-                        vpnService.setUnderlyingNetworks(arrayOf(activeNet))
-                        cm.getLinkProperties(activeNet)?.dnsServers?.forEach { address ->
-                            if (address.hostAddress != "10.0.0.2" && !address.isLoopbackAddress) {
-                                servers.add(address)
-                            }
-                        }
+                val activeNet = cm.activeNetwork ?: return
+                val caps = cm.getNetworkCapabilities(activeNet) ?: return
+                // Skip if this is the VPN interface itself
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
+
+                activePhysicalNetwork = activeNet
+                vpnService.setUnderlyingNetworks(arrayOf(activeNet))
+
+                val servers = mutableListOf<InetAddress>()
+                cm.getLinkProperties(activeNet)?.dnsServers?.forEach { address ->
+                    val host = address.hostAddress ?: ""
+                    if (host !in VPN_LOOPBACK_ADDRESSES && !address.isLoopbackAddress) {
+                        servers.add(address)
                     }
                 }
+                cachedCarrierServers.clear()
+                cachedCarrierServers.addAll(servers)
+                Log.d(TAG, "Initial carrier DNS: ${cachedCarrierServers.map { it.hostAddress }}")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Error in refreshDnsServers: ${e.message}")
         }
-
-        servers.addAll(publicFallbacks)
-        cachedDnsServers.clear()
-        cachedDnsServers.addAll(servers.distinct())
     }
 
     /**
-     * Forwards an allowed DNS query payload to upstream DNS servers.
-     * Binds the socket to the underlying physical network and tries carrier DNS first, then public fallbacks.
+     * Forwards a raw DNS query payload to upstream DNS servers over the physical network.
+     *
+     * Strategy:
+     *  1. Try each carrier/Wi-Fi DNS server with its own socket (fast, avoids cross-server contamination).
+     *  2. If all carrier servers fail, try each public fallback server.
+     *  3. Return null only if every server and fallback times out.
+     *
+     * Each server gets a fresh socket so a stale or stuck send/receive on one server
+     * cannot block forward progress to the next server.
      */
     fun forward(dnsPayload: ByteArray, offset: Int, length: Int): ByteArray? {
-        val servers = if (cachedDnsServers.isNotEmpty()) cachedDnsServers else publicFallbacks
         val network = activePhysicalNetwork
 
+        // Build the ordered server list: carrier first, then public fallbacks
+        val servers = buildList {
+            addAll(cachedCarrierServers)
+            // Add public fallbacks that are not already in carrier list
+            val carrierHosts = cachedCarrierServers.map { it.hostAddress }.toSet()
+            publicFallbacks.forEach { fb ->
+                if (fb.hostAddress !in carrierHosts) add(fb)
+            }
+        }
+
+        if (servers.isEmpty()) {
+            Log.w(TAG, "No DNS servers available — using public fallbacks only")
+            return tryServers(publicFallbacks, network, dnsPayload, offset, length)
+        }
+
+        return tryServers(servers, network, dnsPayload, offset, length)
+    }
+
+    /**
+     * Tries each server in order, using a fresh socket per server to prevent cross-contamination.
+     */
+    private fun tryServers(
+        servers: List<InetAddress>,
+        network: Network?,
+        dnsPayload: ByteArray,
+        offset: Int,
+        length: Int
+    ): ByteArray? {
+        for (server in servers) {
+            val result = trySingleServer(server, network, dnsPayload, offset, length)
+            if (result != null) return result
+        }
+        return null
+    }
+
+    private fun trySingleServer(
+        server: InetAddress,
+        network: Network?,
+        dnsPayload: ByteArray,
+        offset: Int,
+        length: Int
+    ): ByteArray? {
         var socket: DatagramSocket? = null
-        try {
+        return try {
             socket = DatagramSocket()
-            
-            // Explicitly bind socket to the physical network so it bypasses VPN routing entirely
+            // Bind to the physical network to bypass VPN routing entirely.
+            // Fall back to vpnService.protect() if no network reference available.
             if (network != null) {
                 network.bindSocket(socket)
             } else {
                 vpnService.protect(socket)
             }
-
             socket.soTimeout = SOCKET_TIMEOUT_MS
+
+            val sendPacket = DatagramPacket(dnsPayload, offset, length, server, DNS_PORT)
+            socket.send(sendPacket)
 
             val receiveBuffer = ByteArray(4096)
             val receivePacket = DatagramPacket(receiveBuffer, receiveBuffer.size)
+            socket.receive(receivePacket)
 
-            for (server in servers) {
-                try {
-                    val sendPacket = DatagramPacket(dnsPayload, offset, length, server, DNS_PORT)
-                    socket.send(sendPacket)
-                    socket.receive(receivePacket)
-
-                    return receiveBuffer.copyOf(receivePacket.length)
-                } catch (e: SocketTimeoutException) {
-                    continue
-                } catch (e: Exception) {
-                    continue
-                }
-            }
+            receiveBuffer.copyOf(receivePacket.length)
+        } catch (e: SocketTimeoutException) {
+            Log.d(TAG, "DNS timeout from ${server.hostAddress}")
+            null
         } catch (e: Exception) {
-            Log.w(TAG, "Error in upstream forward: ${e.message}")
+            Log.d(TAG, "DNS error from ${server.hostAddress}: ${e.message}")
+            null
         } finally {
-            try {
-                socket?.close()
-            } catch (e: Exception) {
-                // ignore
-            }
+            try { socket?.close() } catch (_: Exception) {}
         }
-        return null
     }
 
+    /**
+     * Unregisters the network callback. Must be called when the VPN is stopped.
+     */
     fun release() {
         try {
             connectivityManager?.unregisterNetworkCallback(networkCallback)
+            Log.d(TAG, "Network callback unregistered")
         } catch (e: Exception) {
-            // ignore
+            // Already unregistered or never registered — safe to ignore
         }
+        activePhysicalNetwork = null
+        cachedCarrierServers.clear()
     }
 }
