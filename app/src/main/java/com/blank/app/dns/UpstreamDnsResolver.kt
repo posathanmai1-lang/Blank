@@ -23,8 +23,8 @@ class UpstreamDnsResolver(private val vpnService: VpnService) {
     companion object {
         private const val TAG = "UpstreamDnsResolver"
         private const val DNS_PORT = 53
-        private const val PRIMARY_TIMEOUT_MS = 700
-        private const val FALLBACK_TIMEOUT_MS = 1000
+        private const val PRIMARY_TIMEOUT_MS = 600
+        private const val FALLBACK_TIMEOUT_MS = 800
         private val VPN_LOOPBACK_ADDRESSES = setOf("10.0.0.2", "127.0.0.1", "::1", "fd00::2")
     }
 
@@ -32,7 +32,8 @@ class UpstreamDnsResolver(private val vpnService: VpnService) {
         vpnService.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
 
     @Volatile
-    private var activePhysicalNetwork: Network? = null
+    var activePhysicalNetwork: Network? = null
+        private set
 
     // Discovered IPv4 carrier/Wi-Fi DNS servers
     private val cachedCarrierServers = CopyOnWriteArrayList<InetAddress>()

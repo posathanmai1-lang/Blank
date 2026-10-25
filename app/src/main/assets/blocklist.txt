@@ -40,6 +40,13 @@ adtech.advertising.com
 in-ad.hotstar.com
 ad.hotstar.com
 ads.hotstar.com
+adtech.hotstar.com
+hotstar-ads.hotstar.com
+adtech-in.hotstar.com
+ads-api.hotstar.com
+tracking.hotstar.com
+telemetry.hotstar.com
+hotstar-analytics.hotstar.com
 hotstar-ads.akamaized.net
 ads.hotstar.akamaized.net
 hotstar.telemetry.videoplaza.tv
@@ -47,6 +54,10 @@ ad.jio.com
 jiomedia.net
 adengine.jio.com
 jioads.akamaized.net
+jioads.com
+adengine.jioads.com
+delivery.jioads.com
+config.jioads.com
 sonyliv-ads.akamaized.net
 zee5-ads.akamaized.net
 

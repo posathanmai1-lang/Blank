@@ -83,6 +83,7 @@ class BlankVpnService : VpnService(), Runnable {
                 .addAddress(VPN_ADDRESS, VPN_PREFIX)
                 .addDnsServer(VPN_ADDRESS)       // Intercept all DNS queries locally via IPv4
                 .addRoute(VPN_ADDRESS, VPN_PREFIX)
+                .allowBypass()                   // CRITICAL: Allow all non-DNS IP traffic to route directly through physical internet!
                 .setMtu(1500)
                 .setBlocking(true)
 
@@ -94,23 +95,18 @@ class BlankVpnService : VpnService(), Runnable {
                 Log.w(TAG, "Could not exempt own package: ${e.message}")
             }
 
-            // Exclude apps with strict anti-VPN checks so they can still connect
-            // (JioHotstar, JioCinema, Netflix, banking/UPI apps)
-            val antiVpnBypassApps = listOf(
-                "in.startv.hotstar",
-                "in.startv.hotstar.dplus",
-                "com.jio.media.ondemand",
-                "com.netflix.ninja",
-                "com.netflix.mediaclient",
-                "com.amazon.avod.thirdpartyclient",
-                "com.google.android.apps.nbu.paisa.user",
-                "net.one97.paytm",
-                "com.phonepe.app",
-                "in.gov.uidai.mAadhaarPlus",
-                "com.sbi.lotusintouch",
-                "com.csam.icici.bank.imobile"
+            // Exclude ONLY banking and UPI apps that strictly forbid active VPN transport (e.g. GPay, Paytm, PhonePe, banking)
+            // Hotstar, JioCinema, YouTube, Netflix, Chrome, browsers, social media, games are all INCLUDED
+            // so their ads and trackers are completely blocked while their video streams flow natively over physical network via allowBypass()!
+            val sensitiveBankingApps = listOf(
+                "com.google.android.apps.nbu.paisa.user", // Google Pay
+                "net.one97.paytm",                        // Paytm
+                "com.phonepe.app",                         // PhonePe
+                "in.gov.uidai.mAadhaarPlus",               // mAadhaar
+                "com.sbi.lotusintouch",                    // SBI Yono
+                "com.csam.icici.bank.imobile"              // ICICI iMobile
             )
-            for (pkg in antiVpnBypassApps) {
+            for (pkg in sensitiveBankingApps) {
                 try {
                     builder.addDisallowedApplication(pkg)
                 } catch (e: Exception) {
@@ -132,6 +128,13 @@ class BlankVpnService : VpnService(), Runnable {
             if (vpnInterface == null) {
                 Log.e(TAG, "Failed to establish VPN interface — user revoked permission?")
                 return
+            }
+
+            // Bind VPN interface to underlying physical network immediately
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                upstreamResolver?.activePhysicalNetwork?.let { net ->
+                    setUnderlyingNetworks(arrayOf(net))
+                }
             }
 
             // Android 8+ requires a foreground notification or the service is killed within seconds
@@ -275,11 +278,9 @@ class BlankVpnService : VpnService(), Runnable {
                 )
                 writePacketToTun(responsePacket)
             } else {
-                // All DNS servers timed out — send SERVFAIL immediately so the OS
-                // retries or reports failure rather than leaving the socket hanging forever.
-                // This was causing other apps to lose internet when Blank was active.
-                val servFail = DnsPacketSynthesizer.createServFailResponse(rawPacket, query)
-                writePacketToTun(servFail)
+                // Upstream servers timed out — do not inject SERVFAIL, as SERVFAIL forces the client app
+                // to immediately fail and declare no internet. Dropping allows the OS standard UDP retry to fire.
+                Log.w(TAG, "Upstream DNS timed out for ${query.domain} — dropping packet to allow OS retry")
             }
         }
     }
