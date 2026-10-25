@@ -23,10 +23,13 @@ object StatsManager {
     }
 
     fun incrementBlocked() {
-        val count = blockedAds.incrementAndGet()
-        totalQueries.incrementAndGet()
-        // Save to local storage asynchronously
-        prefs.edit().putLong(KEY_BLOCKED_ADS, count).apply()
+        val blocked = blockedAds.incrementAndGet()
+        val total = totalQueries.incrementAndGet()
+        // Persist both counters atomically
+        prefs.edit()
+            .putLong(KEY_BLOCKED_ADS, blocked)
+            .putLong(KEY_TOTAL_QUERIES, total)
+            .apply()
         onStatsUpdated?.invoke()
     }
 

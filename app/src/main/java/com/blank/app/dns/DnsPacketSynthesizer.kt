@@ -199,8 +199,10 @@ object DnsPacketSynthesizer {
         response[udpOffset + 6] = 0x00.toByte()
         response[udpOffset + 7] = 0x00.toByte()
 
-        // 3. DNS Payload
+        // 3. DNS Payload - ensure transaction ID matches original query
         System.arraycopy(upstreamDnsPayload, 0, response, 28, payloadLength)
+        response[28] = ((query.transactionId shr 8) and 0xFF).toByte()
+        response[29] = (query.transactionId and 0xFF).toByte()
 
         return response
     }

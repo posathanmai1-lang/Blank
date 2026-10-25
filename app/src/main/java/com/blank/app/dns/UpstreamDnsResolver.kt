@@ -10,16 +10,22 @@ import android.os.Build
 import android.util.Log
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.Inet4Address
 import java.net.InetAddress
-import java.net.SocketTimeoutException
+import java.util.concurrent.Callable
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ExecutorCompletionService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class UpstreamDnsResolver(private val vpnService: VpnService) {
 
     companion object {
         private const val TAG = "UpstreamDnsResolver"
         private const val DNS_PORT = 53
-        private const val SOCKET_TIMEOUT_MS = 800 // 800ms per server for fast resolution
+        private const val PRIMARY_TIMEOUT_MS = 700
+        private const val FALLBACK_TIMEOUT_MS = 1000
+        private val VPN_LOOPBACK_ADDRESSES = setOf("10.0.0.2", "127.0.0.1", "::1", "fd00::2")
     }
 
     private val connectivityManager =
@@ -28,15 +34,31 @@ class UpstreamDnsResolver(private val vpnService: VpnService) {
     @Volatile
     private var activePhysicalNetwork: Network? = null
 
-    private val cachedDnsServers = CopyOnWriteArrayList<InetAddress>()
+    // Discovered IPv4 carrier/Wi-Fi DNS servers
+    private val cachedCarrierServers = CopyOnWriteArrayList<InetAddress>()
 
-    private val publicFallbacks: List<InetAddress> by lazy {
+    // Global Anycast high-performance DNS resolvers
+    private val publicPrimary: List<InetAddress> by lazy {
         listOfNotNull(
-            try { InetAddress.getByAddress(byteArrayOf(1, 1, 1, 1)) } catch (e: Exception) { null },
-            try { InetAddress.getByAddress(byteArrayOf(8, 8, 8, 8)) } catch (e: Exception) { null },
-            try { InetAddress.getByAddress(byteArrayOf(9, 9, 9, 9)) } catch (e: Exception) { null },
-            try { InetAddress.getByAddress(byteArrayOf(1, 0, 0, 1)) } catch (e: Exception) { null }
+            safeByAddress(byteArrayOf(1, 1, 1, 1)),   // Cloudflare Primary
+            safeByAddress(byteArrayOf(8, 8, 8, 8))    // Google Primary
         )
+    }
+
+    private val publicSecondary: List<InetAddress> by lazy {
+        listOfNotNull(
+            safeByAddress(byteArrayOf(1, 0, 0, 1)),   // Cloudflare Secondary
+            safeByAddress(byteArrayOf(8, 8, 4, 4)),   // Google Secondary
+            safeByAddress(byteArrayOf(9, 9, 9, 9))    // Quad9
+        )
+    }
+
+    private val upstreamExecutor = Executors.newFixedThreadPool(6)
+
+    private fun safeByAddress(bytes: ByteArray): InetAddress? = try {
+        InetAddress.getByAddress(bytes)
+    } catch (e: Exception) {
+        null
     }
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -52,13 +74,18 @@ class UpstreamDnsResolver(private val vpnService: VpnService) {
         }
 
         override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
-            handleNetworkUpdate(network)
+            val cm = connectivityManager ?: return
+            val caps = cm.getNetworkCapabilities(network) ?: return
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                handleNetworkUpdate(network)
+            }
         }
 
         override fun onLost(network: Network) {
             if (activePhysicalNetwork == network) {
+                Log.w(TAG, "Active physical network lost — resetting carrier DNS")
                 activePhysicalNetwork = null
-                refreshDnsServers()
+                cachedCarrierServers.clear()
             }
         }
     }
@@ -73,6 +100,7 @@ class UpstreamDnsResolver(private val vpnService: VpnService) {
             val cm = connectivityManager ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 cm.registerDefaultNetworkCallback(networkCallback)
+                Log.d(TAG, "Registered default network callback")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to register network callback: ${e.message}")
@@ -91,107 +119,174 @@ class UpstreamDnsResolver(private val vpnService: VpnService) {
             val linkProps = cm.getLinkProperties(network)
             val newServers = mutableListOf<InetAddress>()
             linkProps?.dnsServers?.forEach { address ->
-                val host = address.hostAddress ?: ""
-                if (host != "10.0.0.2" && !address.isLoopbackAddress && !address.isAnyLocalAddress) {
-                    newServers.add(address)
+                // Filter strictly to IPv4 addresses to avoid IPv6 timeout delays
+                if (address is Inet4Address) {
+                    val host = address.hostAddress ?: ""
+                    if (host !in VPN_LOOPBACK_ADDRESSES &&
+                        !address.isLoopbackAddress &&
+                        !address.isAnyLocalAddress) {
+                        newServers.add(address)
+                    }
                 }
             }
-            newServers.addAll(publicFallbacks)
 
-            cachedDnsServers.clear()
-            cachedDnsServers.addAll(newServers.distinct())
-            Log.d(TAG, "Active physical network updated: ${network}, DNS: ${cachedDnsServers.map { it.hostAddress }}")
+            cachedCarrierServers.clear()
+            cachedCarrierServers.addAll(newServers)
+            Log.d(TAG, "Physical network updated. Carrier IPv4 DNS: ${cachedCarrierServers.map { it.hostAddress }}")
         } catch (e: Exception) {
-            Log.w(TAG, "Error processing network update: ${e.message}")
+            Log.w(TAG, "Error handling network update: ${e.message}")
         }
     }
 
-    /**
-     * Fallback discovery in case callback hasn't fired yet
-     */
     private fun refreshDnsServers() {
         val cm = connectivityManager ?: return
-        val servers = mutableListOf<InetAddress>()
-
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val activeNet = cm.activeNetwork
-                if (activeNet != null) {
-                    val caps = cm.getNetworkCapabilities(activeNet)
-                    if (caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
-                        activePhysicalNetwork = activeNet
-                        vpnService.setUnderlyingNetworks(arrayOf(activeNet))
-                        cm.getLinkProperties(activeNet)?.dnsServers?.forEach { address ->
-                            if (address.hostAddress != "10.0.0.2" && !address.isLoopbackAddress) {
-                                servers.add(address)
-                            }
+                val activeNet = cm.activeNetwork ?: return
+                val caps = cm.getNetworkCapabilities(activeNet) ?: return
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
+
+                activePhysicalNetwork = activeNet
+                vpnService.setUnderlyingNetworks(arrayOf(activeNet))
+
+                val servers = mutableListOf<InetAddress>()
+                cm.getLinkProperties(activeNet)?.dnsServers?.forEach { address ->
+                    if (address is Inet4Address) {
+                        val host = address.hostAddress ?: ""
+                        if (host !in VPN_LOOPBACK_ADDRESSES && !address.isLoopbackAddress) {
+                            servers.add(address)
                         }
                     }
                 }
+                cachedCarrierServers.clear()
+                cachedCarrierServers.addAll(servers)
+                Log.d(TAG, "Initial carrier IPv4 DNS: ${cachedCarrierServers.map { it.hostAddress }}")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Error in refreshDnsServers: ${e.message}")
         }
-
-        servers.addAll(publicFallbacks)
-        cachedDnsServers.clear()
-        cachedDnsServers.addAll(servers.distinct())
     }
 
     /**
-     * Forwards an allowed DNS query payload to upstream DNS servers.
-     * Binds the socket to the underlying physical network and tries carrier DNS first, then public fallbacks.
+     * Forwards a raw DNS query payload concurrently to fast upstream DNS servers.
+     * Uses Cloudflare (1.1.1.1) and Google (8.8.8.8) in parallel (racing for fastest response),
+     * with instant fallback to secondary and carrier IPv4 DNS.
      */
     fun forward(dnsPayload: ByteArray, offset: Int, length: Int): ByteArray? {
-        val servers = if (cachedDnsServers.isNotEmpty()) cachedDnsServers else publicFallbacks
         val network = activePhysicalNetwork
 
-        var socket: DatagramSocket? = null
-        try {
-            socket = DatagramSocket()
-            
-            // Explicitly bind socket to the physical network so it bypasses VPN routing entirely
-            if (network != null) {
-                network.bindSocket(socket)
-            } else {
-                vpnService.protect(socket)
-            }
+        // 1. Race primary ultra-fast servers (1.1.1.1 + 8.8.8.8) in parallel with 700ms timeout
+        val primaryResult = raceServers(publicPrimary, network, dnsPayload, offset, length, PRIMARY_TIMEOUT_MS)
+        if (primaryResult != null) {
+            return primaryResult
+        }
 
-            socket.soTimeout = SOCKET_TIMEOUT_MS
+        // 2. If primary timed out, race secondary (1.0.0.1, 8.8.4.4, 9.9.9.9) + carrier DNS
+        val fallbacks = buildList {
+            addAll(publicSecondary)
+            val addedHosts = map { it.hostAddress }.toSet()
+            cachedCarrierServers.forEach { carrier ->
+                if (carrier.hostAddress !in addedHosts) add(carrier)
+            }
+        }
+
+        return raceServers(fallbacks, network, dnsPayload, offset, length, FALLBACK_TIMEOUT_MS)
+    }
+
+    private fun raceServers(
+        servers: List<InetAddress>,
+        network: Network?,
+        dnsPayload: ByteArray,
+        offset: Int,
+        length: Int,
+        timeoutMs: Int
+    ): ByteArray? {
+        if (servers.isEmpty()) return null
+
+        val payloadCopy = dnsPayload.copyOfRange(offset, offset + length)
+        val completionService = ExecutorCompletionService<ByteArray?>(upstreamExecutor)
+
+        for (server in servers) {
+            completionService.submit(Callable {
+                trySingleServer(server, network, payloadCopy, 0, payloadCopy.size, timeoutMs)
+            })
+        }
+
+        val startTime = System.currentTimeMillis()
+        for (i in servers.indices) {
+            val remaining = timeoutMs - (System.currentTimeMillis() - startTime)
+            if (remaining <= 0) break
+            try {
+                val future = completionService.poll(remaining, TimeUnit.MILLISECONDS)
+                if (future != null) {
+                    val res = future.get()
+                    if (res != null && res.isNotEmpty()) {
+                        return res
+                    }
+                }
+            } catch (e: Exception) {
+                // Try next completed future
+            }
+        }
+
+        return null
+    }
+
+    private fun trySingleServer(
+        server: InetAddress,
+        network: Network?,
+        dnsPayload: ByteArray,
+        offset: Int,
+        length: Int,
+        timeoutMs: Int
+    ): ByteArray? {
+        var socket: DatagramSocket? = null
+        return try {
+            socket = DatagramSocket()
+            // CRITICAL: Always protect the socket so its packets bypass VPN routing
+            vpnService.protect(socket)
+
+            if (network != null) {
+                try {
+                    network.bindSocket(socket)
+                } catch (e: Exception) {
+                    // Ignore bind error — vpnService.protect() already handles bypass
+                }
+            }
+            socket.soTimeout = timeoutMs
+
+            val sendPacket = DatagramPacket(dnsPayload, offset, length, server, DNS_PORT)
+            socket.send(sendPacket)
 
             val receiveBuffer = ByteArray(4096)
             val receivePacket = DatagramPacket(receiveBuffer, receiveBuffer.size)
+            socket.receive(receivePacket)
 
-            for (server in servers) {
-                try {
-                    val sendPacket = DatagramPacket(dnsPayload, offset, length, server, DNS_PORT)
-                    socket.send(sendPacket)
-                    socket.receive(receivePacket)
-
-                    return receiveBuffer.copyOf(receivePacket.length)
-                } catch (e: SocketTimeoutException) {
-                    continue
-                } catch (e: Exception) {
-                    continue
-                }
+            if (receivePacket.length > 0) {
+                receiveBuffer.copyOf(receivePacket.length)
+            } else {
+                null
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Error in upstream forward: ${e.message}")
+            null
         } finally {
-            try {
-                socket?.close()
-            } catch (e: Exception) {
-                // ignore
-            }
+            try { socket?.close() } catch (_: Exception) {}
         }
-        return null
     }
 
     fun release() {
         try {
             connectivityManager?.unregisterNetworkCallback(networkCallback)
+            Log.d(TAG, "Network callback unregistered")
         } catch (e: Exception) {
-            // ignore
+            // Already unregistered
         }
+        try {
+            upstreamExecutor.shutdownNow()
+        } catch (e: Exception) {
+            // Ignore
+        }
+        activePhysicalNetwork = null
+        cachedCarrierServers.clear()
     }
 }
