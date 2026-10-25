@@ -87,6 +87,16 @@ class BlankVpnService : VpnService(), Runnable {
                 .setMtu(1500)
                 .setBlocking(true)
 
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                builder.setMetered(false)
+            }
+            try {
+                builder.allowFamily(android.system.OsConstants.AF_INET)
+                builder.allowFamily(android.system.OsConstants.AF_INET6)
+            } catch (e: Exception) {
+                Log.w(TAG, "allowFamily: ${e.message}")
+            }
+
             // Disallow Blank itself so its upstream UDP sockets never loop into the TUN
             try {
                 builder.addDisallowedApplication(packageName)
@@ -143,6 +153,9 @@ class BlankVpnService : VpnService(), Runnable {
             dnsExecutor = Executors.newFixedThreadPool(4)
             isRunning.set(true)
             stateChangeListener?.invoke(true)
+
+            // Start live diagnostic server on port 8080
+            com.blank.app.util.DiagnosticHttpServer.start()
 
             workerThread = Thread(this, "BlankVpnThread").apply { start() }
             Log.i(TAG, "Blank VPN active — ${BlocklistMatcher.blocklistCount} blocked domains")
@@ -252,12 +265,14 @@ class BlankVpnService : VpnService(), Runnable {
     }
 
     private fun processDnsQuery(rawPacket: ByteArray, query: com.blank.app.dns.ParsedDnsQuery) {
+        val startTime = System.currentTimeMillis()
         val domain = query.domain
         val isBlocked = BlocklistMatcher.isBlocked(domain)
 
         if (isBlocked) {
             // Synthesize instant 0.0.0.0 DNS response — ad is blocked
             StatsManager.incrementBlocked()
+            com.blank.app.util.LiveQueryMonitor.record(domain, true, 0)
             val responsePacket = DnsPacketSynthesizer.createBlockedResponse(rawPacket, query)
             writePacketToTun(responsePacket)
         } else {
@@ -268,9 +283,11 @@ class BlankVpnService : VpnService(), Runnable {
                 query.dnsPayloadOffset,
                 query.dnsPayloadLength
             )
+            val latency = System.currentTimeMillis() - startTime
 
             if (upstreamPayload != null) {
-                // Got a real answer — wrap it and inject back into TUN
+                // Got a real answer — record in monitor and inject back into TUN
+                com.blank.app.util.LiveQueryMonitor.record(domain, false, latency)
                 val responsePacket = DnsPacketSynthesizer.wrapUpstreamResponse(
                     query,
                     upstreamPayload,
@@ -280,7 +297,7 @@ class BlankVpnService : VpnService(), Runnable {
             } else {
                 // Upstream servers timed out — do not inject SERVFAIL, as SERVFAIL forces the client app
                 // to immediately fail and declare no internet. Dropping allows the OS standard UDP retry to fire.
-                Log.w(TAG, "Upstream DNS timed out for ${query.domain} — dropping packet to allow OS retry")
+                Log.w(TAG, "Upstream DNS timed out for $domain after ${latency}ms — dropping packet to allow OS retry")
             }
         }
     }
@@ -306,6 +323,7 @@ class BlankVpnService : VpnService(), Runnable {
 
         // Stop foreground before releasing resources
         stopForeground(true)
+        com.blank.app.util.DiagnosticHttpServer.stop()
 
         dnsExecutor?.shutdownNow()
         dnsExecutor = null
