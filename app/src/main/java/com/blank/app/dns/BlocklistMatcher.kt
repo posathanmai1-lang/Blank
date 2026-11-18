@@ -60,14 +60,7 @@ object BlocklistMatcher {
             context.assets.open(assetFileName).use { inputStream ->
                 BufferedReader(InputStreamReader(inputStream)).use { reader ->
                     reader.forEachLine { rawLine ->
-                        val line = rawLine.trim()
-                        if (line.isNotEmpty() && !line.startsWith("#")) {
-                            // Strip possible leading '0.0.0.0 ' or '127.0.0.1 ' if hosts format
-                            val domain = line.split("\\s+".toRegex()).last()
-                            if (domain.isNotEmpty() && !domain.startsWith("#")) {
-                                onDomain(domain)
-                            }
-                        }
+                        parseDomainLine(rawLine)?.let(onDomain)
                     }
                 }
             }
@@ -81,7 +74,16 @@ object BlocklistMatcher {
      * Example: for "ads.unity3d.com", checks "ads.unity3d.com" then "unity3d.com".
      */
     fun isBlocked(rawDomain: String): Boolean {
-        if (!isLoaded || rawDomain.isEmpty()) return false
+        if (!isLoaded) return false
+        return isBlocked(rawDomain, blockedDomains, whitelistedDomains)
+    }
+
+    internal fun isBlocked(
+        rawDomain: String,
+        blockedDomains: Set<String>,
+        whitelistedDomains: Set<String>
+    ): Boolean {
+        if (rawDomain.isEmpty()) return false
 
         // Normalize domain (strip trailing dot and convert to lowercase)
         val domain = if (rawDomain.endsWith('.')) {
@@ -113,5 +115,48 @@ object BlocklistMatcher {
         }
 
         return false
+    }
+
+    /** Accepts one domain per line or a hosts-file mapping; ignores comments and filter syntax. */
+    internal fun parseDomainLine(rawLine: String): String? {
+        val line = rawLine.substringBefore('#').trim()
+        if (line.isEmpty()) return null
+
+        val fields = line.split("\\s+".toRegex())
+        val candidate = when {
+            fields.size == 1 -> fields[0]
+            isHostsAddress(fields[0]) -> fields.getOrNull(1) ?: return null
+            else -> return null
+        }
+
+        val domain = candidate.removeSuffix(".").lowercase()
+        if (domain.isEmpty() || domain.length > 253) return null
+        if (isHostsAddress(domain) ||
+            domain == "localhost" || domain.endsWith(".localhost") ||
+            domain.endsWith(".localdomain") || domain == "ip6-localhost" ||
+            domain == "ip6-loopback" || domain == "broadcasthost"
+        ) {
+            return null
+        }
+
+        val labels = domain.split('.')
+        if (labels.any { label ->
+                label.isEmpty() || label.length > 63 ||
+                    label.first() == '-' || label.last() == '-' ||
+                    label.any { char -> !char.isLetterOrDigit() && char != '-' }
+            }) {
+            return null
+        }
+
+        return domain
+    }
+
+    private fun isHostsAddress(value: String): Boolean {
+        if (value == "::" || value == "::1") return true
+        val octets = value.split('.')
+        return octets.size == 4 && octets.all { octet ->
+            val number = octet.toIntOrNull()
+            number != null && number in 0..255
+        }
     }
 }

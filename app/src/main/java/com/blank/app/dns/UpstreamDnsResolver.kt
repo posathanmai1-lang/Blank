@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.util.Log
+import com.blank.app.service.BlankVpnService
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -46,7 +47,10 @@ class UpstreamDnsResolver(private val vpnService: VpnService) {
                         val linkProps = cm.getLinkProperties(network)
                         linkProps?.dnsServers?.forEach { address ->
                             val host = address.hostAddress ?: ""
-                            if (host != "10.0.0.2" && !address.isLoopbackAddress && !address.isAnyLocalAddress) {
+                            if (host != BlankVpnService.VPN_ADDRESS &&
+                                host != BlankVpnService.VPN_DNS_ADDRESS &&
+                                !address.isLoopbackAddress && !address.isAnyLocalAddress
+                            ) {
                                 servers.add(address)
                             }
                         }

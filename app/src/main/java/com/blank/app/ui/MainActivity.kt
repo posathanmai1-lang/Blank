@@ -93,7 +93,7 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, BlankVpnService::class.java).apply {
             action = BlankVpnService.ACTION_START
         }
-        startService(intent)
+        ContextCompat.startForegroundService(this, intent)
         updateUi()
     }
 

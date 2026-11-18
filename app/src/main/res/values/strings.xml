@@ -13,4 +13,8 @@
     <string name="btn_start">START BLANK</string>
     <string name="btn_stop">STOP BLANK</string>
     <string name="milestone_info">Phase 1: Local DNS Filtering • 100% On-Device Privacy</string>
+    <string name="vpn_notification_channel">VPN protection</string>
+    <string name="vpn_notification_description">Status for Blank DNS protection.</string>
+    <string name="vpn_notification_title">Blank protection is active</string>
+    <string name="vpn_notification_text">DNS filtering is running on this device.</string>
 </resources>

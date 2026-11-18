@@ -1,0 +1,11 @@
+The bundled blocklist is a static snapshot of the AdAway default blocklist.
+
+Source: https://github.com/AdAway/adaway.github.io
+License: Creative Commons Attribution 3.0 (CC BY 3.0)
+License text: https://creativecommons.org/licenses/by/3.0/
+Snapshot date: 2026-11-18
+
+Blank reads the hostname from each hosts-file mapping, normalizes hostnames to
+lowercase, deduplicates them in memory, and skips local loopback aliases.
+The original source attribution and license header are also retained in
+blocklist.txt.

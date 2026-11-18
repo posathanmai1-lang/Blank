@@ -1,10 +1,16 @@
 package com.blank.app.service
 
 import android.app.PendingIntent
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import androidx.core.app.NotificationCompat
+import com.blank.app.R
 import com.blank.app.dns.BlocklistMatcher
 import com.blank.app.dns.DnsPacketParser
 import com.blank.app.dns.DnsPacketSynthesizer
@@ -24,7 +30,10 @@ class BlankVpnService : VpnService(), Runnable {
         const val ACTION_START = "com.blank.app.START"
         const val ACTION_STOP = "com.blank.app.STOP"
         const val VPN_ADDRESS = "10.0.0.2"
+        const val VPN_DNS_ADDRESS = "10.0.0.1"
         const val VPN_PREFIX = 32
+        private const val NOTIFICATION_CHANNEL_ID = "blank_vpn_status"
+        private const val NOTIFICATION_ID = 1
 
         val isRunning = AtomicBoolean(false)
         var stateChangeListener: ((Boolean) -> Unit)? = null
@@ -39,6 +48,7 @@ class BlankVpnService : VpnService(), Runnable {
 
     override fun onCreate() {
         super.onCreate()
+        createNotificationChannel()
         StatsManager.init(applicationContext)
         if (!BlocklistMatcher.isLoaded) {
             BlocklistMatcher.load(applicationContext)
@@ -47,11 +57,72 @@ class BlankVpnService : VpnService(), Runnable {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP -> stopVpn()
-            else -> startVpn()
+        if (intent?.action == ACTION_STOP) {
+            stopVpn()
+            return START_NOT_STICKY
         }
+
+        try {
+            startAsForegroundService()
+            startVpn()
+            if (!isRunning.get()) {
+                stopVpn()
+                stopSelf(startId)
+                return START_NOT_STICKY
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start VPN foreground service", e)
+            stopVpn()
+            return START_NOT_STICKY
+        }
+
         return START_STICKY
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+
+        val channel = NotificationChannel(
+            NOTIFICATION_CHANNEL_ID,
+            getString(R.string.vpn_notification_channel),
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = getString(R.string.vpn_notification_description)
+            setShowBadge(false)
+        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+    }
+
+    private fun startAsForegroundService() {
+        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_blank)
+            .setContentTitle(getString(R.string.vpn_notification_title))
+            .setContentText(getString(R.string.vpn_notification_text))
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .setContentIntent(
+                packageManager.getLaunchIntentForPackage(packageName)?.let {
+                    PendingIntent.getActivity(
+                        this,
+                        0,
+                        it,
+                        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                    )
+                }
+            )
+            .build()
+
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun startVpn() {
@@ -68,8 +139,8 @@ class BlankVpnService : VpnService(), Runnable {
             val builder = Builder()
                 .setSession("Blank")
                 .addAddress(VPN_ADDRESS, VPN_PREFIX)
-                .addDnsServer(VPN_ADDRESS) // Intercept all system DNS queries
-                .addRoute(VPN_ADDRESS, VPN_PREFIX)
+                .addDnsServer(VPN_DNS_ADDRESS) // Keep the virtual DNS server distinct from the TUN address
+                .addRoute(VPN_DNS_ADDRESS, VPN_PREFIX)
                 .setMtu(1500)
                 .setBlocking(true)
 
@@ -89,7 +160,6 @@ class BlankVpnService : VpnService(), Runnable {
             for (pkg in antiVpnBypassApps) {
                 try {
                     builder.addDisallowedApplication(pkg)
-                    Log.i(TAG, "Exempted anti-VPN app from tunnel: $pkg")
                 } catch (e: Exception) {
                     // App is not installed on this device, safely ignore
                 }
@@ -251,6 +321,8 @@ class BlankVpnService : VpnService(), Runnable {
 
         workerThread?.interrupt()
         workerThread = null
+
+        stopForeground(STOP_FOREGROUND_REMOVE)
 
         stopSelf()
     }
