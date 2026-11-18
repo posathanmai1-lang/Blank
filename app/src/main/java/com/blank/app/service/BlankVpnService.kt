@@ -144,11 +144,9 @@ class BlankVpnService : VpnService(), Runnable {
                 .setMtu(1500)
                 .setBlocking(true)
 
-            // Exclude apps with strict anti-VPN checks (JioHotstar, JioCinema, Netflix, banking)
-            // This strips the TRANSPORT_VPN flag for these apps, preventing NET_100 errors.
+            // Keep known strict anti-VPN apps outside the tunnel. Hotstar stays inside so its
+            // DNS requests can be filtered.
             val antiVpnBypassApps = listOf(
-                "in.startv.hotstar",
-                "in.startv.hotstar.dplus",
                 "com.jio.media.ondemand",
                 "com.netflix.ninja",
                 "com.netflix.mediaclient",
@@ -232,11 +230,6 @@ class BlankVpnService : VpnService(), Runnable {
         val protocol = packet[9].toInt() and 0xFF
         if (protocol == 17) { // UDP
             val dstPort = ((packet[ihl + 2].toInt() and 0xFF) shl 8) or (packet[ihl + 3].toInt() and 0xFF)
-
-            // Silently drop outgoing QUIC (UDP 443) to force standard TCP HTTPS + DNS resolution
-            if (dstPort == 443) {
-                return
-            }
 
             // Port 53: DNS Query
             if (dstPort == 53) {
